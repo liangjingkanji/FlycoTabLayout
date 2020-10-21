@@ -24,10 +24,10 @@
             tl:tl_underline_color="#DDDDDD"
             tl:tl_underline_height="1dp"/>
 
-        <android.support.v4.view.ViewPager
+        <androidx.viewpager.widget.ViewPager
             android:id="@+id/vp_2"
             android:layout_width="match_parent"
-            android:layout_height="84dp"/>
+            android:layout_height="84dp" />
 
         <com.flyco.tablayout.CommonTabLayout
             android:id="@+id/tl_2"

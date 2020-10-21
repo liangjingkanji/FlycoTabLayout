@@ -1,5 +1,7 @@
 package com.flyco.tablayout;
 
+import android.animation.TypeEvaluator;
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.content.res.TypedArray;
 import android.graphics.Canvas;
@@ -10,42 +12,43 @@ import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Parcelable;
-import android.support.v4.app.Fragment;
-import android.support.v4.app.FragmentActivity;
-import android.support.v4.app.FragmentManager;
-import android.support.v4.app.FragmentPagerAdapter;
-import android.support.v4.view.PagerAdapter;
-import android.support.v4.view.ViewPager;
 import android.util.AttributeSet;
 import android.util.SparseArray;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.HorizontalScrollView;
+import android.view.animation.OvershootInterpolator;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import androidx.fragment.app.Fragment;
+import androidx.fragment.app.FragmentActivity;
+
+import com.flyco.tablayout.listener.CustomTabEntity;
 import com.flyco.tablayout.listener.OnTabSelectListener;
+import com.flyco.tablayout.utils.FragmentChangeManager;
 import com.flyco.tablayout.utils.UnreadMsgUtils;
 import com.flyco.tablayout.widget.MsgView;
 
 import java.util.ArrayList;
-import java.util.Collections;
 
-/** 滑动TabLayout,对于ViewPager的依赖性强 */
-public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.OnPageChangeListener {
+/**
+ * 没有继承HorizontalScrollView不能滑动,对于ViewPager无依赖
+ */
+public class CommonTabLayout extends FrameLayout implements ValueAnimator.AnimatorUpdateListener {
     private Context mContext;
-    private ViewPager mViewPager;
-    private ArrayList<String> mTitles;
+    private ArrayList<CustomTabEntity> mTabEntitys = new ArrayList<>();
     private LinearLayout mTabsContainer;
     private int mCurrentTab;
-    private float mCurrentPositionOffset;
+    private int mLastTab;
     private int mTabCount;
-    /** 用于绘制显示器 */
+    /**
+     * 用于绘制显示器
+     */
     private Rect mIndicatorRect = new Rect();
-    /** 用于实现滚动居中 */
-    private Rect mTabRect = new Rect();
     private GradientDrawable mIndicatorDrawable = new GradientDrawable();
 
     private Paint mRectPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -61,7 +64,9 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
     private boolean mTabSpaceEqual;
     private float mTabWidth;
 
-    /** indicator */
+    /**
+     * indicator
+     */
     private int mIndicatorColor;
     private float mIndicatorHeight;
     private float mIndicatorWidth;
@@ -70,20 +75,28 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
     private float mIndicatorMarginTop;
     private float mIndicatorMarginRight;
     private float mIndicatorMarginBottom;
+    private long mIndicatorAnimDuration;
+    private boolean mIndicatorAnimEnable;
+    private boolean mIndicatorBounceEnable;
     private int mIndicatorGravity;
-    private boolean mIndicatorWidthEqualTitle;
 
-    /** underline */
+    /**
+     * underline
+     */
     private int mUnderlineColor;
     private float mUnderlineHeight;
     private int mUnderlineGravity;
 
-    /** divider */
+    /**
+     * divider
+     */
     private int mDividerColor;
     private float mDividerWidth;
     private float mDividerPadding;
 
-    /** title */
+    /**
+     * title
+     */
     private static final int TEXT_BOLD_NONE = 0;
     private static final int TEXT_BOLD_WHEN_SELECT = 1;
     private static final int TEXT_BOLD_BOTH = 2;
@@ -93,21 +106,35 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
     private int mTextBold;
     private boolean mTextAllCaps;
 
-    private int mLastScrollX;
-    private int mHeight;
-    private boolean mSnapOnTabClick;
+    /**
+     * icon
+     */
+    private boolean mIconVisible;
+    private int mIconGravity;
+    private float mIconWidth;
+    private float mIconHeight;
+    private float mIconMargin;
 
-    public SlidingTabLayout(Context context) {
+    private int mHeight;
+
+    /**
+     * anim
+     */
+    private ValueAnimator mValueAnimator;
+    private OvershootInterpolator mInterpolator = new OvershootInterpolator(1.5f);
+
+    private FragmentChangeManager mFragmentChangeManager;
+
+    public CommonTabLayout(Context context) {
         this(context, null, 0);
     }
 
-    public SlidingTabLayout(Context context, AttributeSet attrs) {
+    public CommonTabLayout(Context context, AttributeSet attrs) {
         this(context, attrs, 0);
     }
 
-    public SlidingTabLayout(Context context, AttributeSet attrs, int defStyleAttr) {
+    public CommonTabLayout(Context context, AttributeSet attrs, int defStyleAttr) {
         super(context, attrs, defStyleAttr);
-        setFillViewport(true);//设置滚动视图是否可以伸缩其内容以填充视口
         setWillNotDraw(false);//重写onDraw方法,需要调用这个方法来清除flag
         setClipChildren(false);
         setClipToPadding(false);
@@ -121,6 +148,7 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
         //get layout_height
         String height = attrs.getAttributeValue("http://schemas.android.com/apk/res/android", "layout_height");
 
+        //create ViewPager
         if (height.equals(ViewGroup.LayoutParams.MATCH_PARENT + "")) {
         } else if (height.equals(ViewGroup.LayoutParams.WRAP_CONTENT + "")) {
         } else {
@@ -129,152 +157,121 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
             mHeight = a.getDimensionPixelSize(0, ViewGroup.LayoutParams.WRAP_CONTENT);
             a.recycle();
         }
+
+        mValueAnimator = ValueAnimator.ofObject(new PointEvaluator(), mLastP, mCurrentP);
+        mValueAnimator.addUpdateListener(this);
     }
 
     private void obtainAttributes(Context context, AttributeSet attrs) {
-        TypedArray ta = context.obtainStyledAttributes(attrs, R.styleable.SlidingTabLayout);
+        TypedArray ta = context.obtainStyledAttributes(attrs, R.styleable.CommonTabLayout);
 
-        mIndicatorStyle = ta.getInt(R.styleable.SlidingTabLayout_tl_indicator_style, STYLE_NORMAL);
-        mIndicatorColor = ta.getColor(R.styleable.SlidingTabLayout_tl_indicator_color, Color.parseColor(mIndicatorStyle == STYLE_BLOCK ? "#4B6A87" : "#ffffff"));
-        mIndicatorHeight = ta.getDimension(R.styleable.SlidingTabLayout_tl_indicator_height,
+        mIndicatorStyle = ta.getInt(R.styleable.CommonTabLayout_tl_indicator_style, 0);
+        mIndicatorColor = ta.getColor(R.styleable.CommonTabLayout_tl_indicator_color, Color.parseColor(mIndicatorStyle == STYLE_BLOCK ? "#4B6A87" : "#ffffff"));
+        mIndicatorHeight = ta.getDimension(R.styleable.CommonTabLayout_tl_indicator_height,
                 dp2px(mIndicatorStyle == STYLE_TRIANGLE ? 4 : (mIndicatorStyle == STYLE_BLOCK ? -1 : 2)));
-        mIndicatorWidth = ta.getDimension(R.styleable.SlidingTabLayout_tl_indicator_width, dp2px(mIndicatorStyle == STYLE_TRIANGLE ? 10 : -1));
-        mIndicatorCornerRadius = ta.getDimension(R.styleable.SlidingTabLayout_tl_indicator_corner_radius, dp2px(mIndicatorStyle == STYLE_BLOCK ? -1 : 0));
-        mIndicatorMarginLeft = ta.getDimension(R.styleable.SlidingTabLayout_tl_indicator_margin_left, dp2px(0));
-        mIndicatorMarginTop = ta.getDimension(R.styleable.SlidingTabLayout_tl_indicator_margin_top, dp2px(mIndicatorStyle == STYLE_BLOCK ? 7 : 0));
-        mIndicatorMarginRight = ta.getDimension(R.styleable.SlidingTabLayout_tl_indicator_margin_right, dp2px(0));
-        mIndicatorMarginBottom = ta.getDimension(R.styleable.SlidingTabLayout_tl_indicator_margin_bottom, dp2px(mIndicatorStyle == STYLE_BLOCK ? 7 : 0));
-        mIndicatorGravity = ta.getInt(R.styleable.SlidingTabLayout_tl_indicator_gravity, Gravity.BOTTOM);
-        mIndicatorWidthEqualTitle = ta.getBoolean(R.styleable.SlidingTabLayout_tl_indicator_width_equal_title, false);
+        mIndicatorWidth = ta.getDimension(R.styleable.CommonTabLayout_tl_indicator_width, dp2px(mIndicatorStyle == STYLE_TRIANGLE ? 10 : -1));
+        mIndicatorCornerRadius = ta.getDimension(R.styleable.CommonTabLayout_tl_indicator_corner_radius, dp2px(mIndicatorStyle == STYLE_BLOCK ? -1 : 0));
+        mIndicatorMarginLeft = ta.getDimension(R.styleable.CommonTabLayout_tl_indicator_margin_left, dp2px(0));
+        mIndicatorMarginTop = ta.getDimension(R.styleable.CommonTabLayout_tl_indicator_margin_top, dp2px(mIndicatorStyle == STYLE_BLOCK ? 7 : 0));
+        mIndicatorMarginRight = ta.getDimension(R.styleable.CommonTabLayout_tl_indicator_margin_right, dp2px(0));
+        mIndicatorMarginBottom = ta.getDimension(R.styleable.CommonTabLayout_tl_indicator_margin_bottom, dp2px(mIndicatorStyle == STYLE_BLOCK ? 7 : 0));
+        mIndicatorAnimEnable = ta.getBoolean(R.styleable.CommonTabLayout_tl_indicator_anim_enable, true);
+        mIndicatorBounceEnable = ta.getBoolean(R.styleable.CommonTabLayout_tl_indicator_bounce_enable, true);
+        mIndicatorAnimDuration = ta.getInt(R.styleable.CommonTabLayout_tl_indicator_anim_duration, -1);
+        mIndicatorGravity = ta.getInt(R.styleable.CommonTabLayout_tl_indicator_gravity, Gravity.BOTTOM);
 
-        mUnderlineColor = ta.getColor(R.styleable.SlidingTabLayout_tl_underline_color, Color.parseColor("#ffffff"));
-        mUnderlineHeight = ta.getDimension(R.styleable.SlidingTabLayout_tl_underline_height, dp2px(0));
-        mUnderlineGravity = ta.getInt(R.styleable.SlidingTabLayout_tl_underline_gravity, Gravity.BOTTOM);
+        mUnderlineColor = ta.getColor(R.styleable.CommonTabLayout_tl_underline_color, Color.parseColor("#ffffff"));
+        mUnderlineHeight = ta.getDimension(R.styleable.CommonTabLayout_tl_underline_height, dp2px(0));
+        mUnderlineGravity = ta.getInt(R.styleable.CommonTabLayout_tl_underline_gravity, Gravity.BOTTOM);
 
-        mDividerColor = ta.getColor(R.styleable.SlidingTabLayout_tl_divider_color, Color.parseColor("#ffffff"));
-        mDividerWidth = ta.getDimension(R.styleable.SlidingTabLayout_tl_divider_width, dp2px(0));
-        mDividerPadding = ta.getDimension(R.styleable.SlidingTabLayout_tl_divider_padding, dp2px(12));
+        mDividerColor = ta.getColor(R.styleable.CommonTabLayout_tl_divider_color, Color.parseColor("#ffffff"));
+        mDividerWidth = ta.getDimension(R.styleable.CommonTabLayout_tl_divider_width, dp2px(0));
+        mDividerPadding = ta.getDimension(R.styleable.CommonTabLayout_tl_divider_padding, dp2px(12));
 
-        mTextsize = ta.getDimension(R.styleable.SlidingTabLayout_tl_textsize, sp2px(14));
-        mTextSelectColor = ta.getColor(R.styleable.SlidingTabLayout_tl_textSelectColor, Color.parseColor("#ffffff"));
-        mTextUnselectColor = ta.getColor(R.styleable.SlidingTabLayout_tl_textUnselectColor, Color.parseColor("#AAffffff"));
-        mTextBold = ta.getInt(R.styleable.SlidingTabLayout_tl_textBold, TEXT_BOLD_NONE);
-        mTextAllCaps = ta.getBoolean(R.styleable.SlidingTabLayout_tl_textAllCaps, false);
+        mTextsize = ta.getDimension(R.styleable.CommonTabLayout_tl_textsize, sp2px(13f));
+        mTextSelectColor = ta.getColor(R.styleable.CommonTabLayout_tl_textSelectColor, Color.parseColor("#ffffff"));
+        mTextUnselectColor = ta.getColor(R.styleable.CommonTabLayout_tl_textUnselectColor, Color.parseColor("#AAffffff"));
+        mTextBold = ta.getInt(R.styleable.CommonTabLayout_tl_textBold, TEXT_BOLD_NONE);
+        mTextAllCaps = ta.getBoolean(R.styleable.CommonTabLayout_tl_textAllCaps, false);
 
-        mTabSpaceEqual = ta.getBoolean(R.styleable.SlidingTabLayout_tl_tab_space_equal, false);
-        mTabWidth = ta.getDimension(R.styleable.SlidingTabLayout_tl_tab_width, dp2px(-1));
-        mTabPadding = ta.getDimension(R.styleable.SlidingTabLayout_tl_tab_padding, mTabSpaceEqual || mTabWidth > 0 ? dp2px(0) : dp2px(20));
+        mIconVisible = ta.getBoolean(R.styleable.CommonTabLayout_tl_iconVisible, true);
+        mIconGravity = ta.getInt(R.styleable.CommonTabLayout_tl_iconGravity, Gravity.TOP);
+        mIconWidth = ta.getDimension(R.styleable.CommonTabLayout_tl_iconWidth, dp2px(0));
+        mIconHeight = ta.getDimension(R.styleable.CommonTabLayout_tl_iconHeight, dp2px(0));
+        mIconMargin = ta.getDimension(R.styleable.CommonTabLayout_tl_iconMargin, dp2px(2.5f));
+
+        mTabSpaceEqual = ta.getBoolean(R.styleable.CommonTabLayout_tl_tab_space_equal, true);
+        mTabWidth = ta.getDimension(R.styleable.CommonTabLayout_tl_tab_width, dp2px(-1));
+        mTabPadding = ta.getDimension(R.styleable.CommonTabLayout_tl_tab_padding, mTabSpaceEqual || mTabWidth > 0 ? dp2px(0) : dp2px(10));
 
         ta.recycle();
     }
 
-    /** 关联ViewPager */
-    public void setViewPager(ViewPager vp) {
-        if (vp == null || vp.getAdapter() == null) {
-            throw new IllegalStateException("ViewPager or ViewPager adapter can not be NULL !");
+    public void setTabData(ArrayList<CustomTabEntity> tabEntitys) {
+        if (tabEntitys == null || tabEntitys.size() == 0) {
+            throw new IllegalStateException("TabEntitys can not be NULL or EMPTY !");
         }
 
-        this.mViewPager = vp;
+        this.mTabEntitys.clear();
+        this.mTabEntitys.addAll(tabEntitys);
 
-        this.mViewPager.removeOnPageChangeListener(this);
-        this.mViewPager.addOnPageChangeListener(this);
         notifyDataSetChanged();
     }
 
-    /** 关联ViewPager,用于不想在ViewPager适配器中设置titles数据的情况 */
-    public void setViewPager(ViewPager vp, String[] titles) {
-        if (vp == null || vp.getAdapter() == null) {
-            throw new IllegalStateException("ViewPager or ViewPager adapter can not be NULL !");
-        }
-
-        if (titles == null || titles.length == 0) {
-            throw new IllegalStateException("Titles can not be EMPTY !");
-        }
-
-        if (titles.length != vp.getAdapter().getCount()) {
-            throw new IllegalStateException("Titles length must be the same as the page count !");
-        }
-
-        this.mViewPager = vp;
-        mTitles = new ArrayList<>();
-        Collections.addAll(mTitles, titles);
-
-        this.mViewPager.removeOnPageChangeListener(this);
-        this.mViewPager.addOnPageChangeListener(this);
-        notifyDataSetChanged();
+    /**
+     * 关联数据支持同时切换fragments
+     */
+    public void setTabData(ArrayList<CustomTabEntity> tabEntitys, FragmentActivity fa, int containerViewId, ArrayList<Fragment> fragments) {
+        mFragmentChangeManager = new FragmentChangeManager(fa.getSupportFragmentManager(), containerViewId, fragments);
+        setTabData(tabEntitys);
     }
 
-    /** 关联ViewPager,用于连适配器都不想自己实例化的情况 */
-    public void setViewPager(ViewPager vp, String[] titles, FragmentActivity fa, ArrayList<Fragment> fragments) {
-        if (vp == null) {
-            throw new IllegalStateException("ViewPager can not be NULL !");
-        }
-
-        if (titles == null || titles.length == 0) {
-            throw new IllegalStateException("Titles can not be EMPTY !");
-        }
-
-        this.mViewPager = vp;
-        this.mViewPager.setAdapter(new InnerPagerAdapter(fa.getSupportFragmentManager(), fragments, titles));
-
-        this.mViewPager.removeOnPageChangeListener(this);
-        this.mViewPager.addOnPageChangeListener(this);
-        notifyDataSetChanged();
-    }
-
-    /** 更新数据 */
+    /**
+     * 更新数据
+     */
     public void notifyDataSetChanged() {
         mTabsContainer.removeAllViews();
-        this.mTabCount = mTitles == null ? mViewPager.getAdapter().getCount() : mTitles.size();
+        this.mTabCount = mTabEntitys.size();
         View tabView;
         for (int i = 0; i < mTabCount; i++) {
-            tabView = View.inflate(mContext, R.layout.layout_tab, null);
-            CharSequence pageTitle = mTitles == null ? mViewPager.getAdapter().getPageTitle(i) : mTitles.get(i);
-            addTab(i, pageTitle.toString(), tabView);
+            if (mIconGravity == Gravity.LEFT) {
+                tabView = View.inflate(mContext, R.layout.layout_tab_left, null);
+            } else if (mIconGravity == Gravity.RIGHT) {
+                tabView = View.inflate(mContext, R.layout.layout_tab_right, null);
+            } else if (mIconGravity == Gravity.BOTTOM) {
+                tabView = View.inflate(mContext, R.layout.layout_tab_bottom, null);
+            } else {
+                tabView = View.inflate(mContext, R.layout.layout_tab_top, null);
+            }
+
+            tabView.setTag(i);
+            addTab(i, tabView);
         }
 
         updateTabStyles();
     }
 
-    public void addNewTab(String title) {
-        View tabView = View.inflate(mContext, R.layout.layout_tab, null);
-        if (mTitles != null) {
-            mTitles.add(title);
-        }
-
-        CharSequence pageTitle = mTitles == null ? mViewPager.getAdapter().getPageTitle(mTabCount) : mTitles.get(mTabCount);
-        addTab(mTabCount, pageTitle.toString(), tabView);
-        this.mTabCount = mTitles == null ? mViewPager.getAdapter().getCount() : mTitles.size();
-
-        updateTabStyles();
-    }
-
-    /** 创建并添加tab */
-    private void addTab(final int position, String title, View tabView) {
-        TextView tv_tab_title = (TextView) tabView.findViewById(R.id.tv_tab_title);
-        if (tv_tab_title != null) {
-            if (title != null) tv_tab_title.setText(title);
-        }
+    /**
+     * 创建并添加tab
+     */
+    private void addTab(final int position, View tabView) {
+        TextView tv_tab_title = tabView.findViewById(R.id.tv_tab_title);
+        tv_tab_title.setText(mTabEntitys.get(position).getTabTitle());
+        ImageView iv_tab_icon = tabView.findViewById(R.id.iv_tab_icon);
+        iv_tab_icon.setImageResource(mTabEntitys.get(position).getTabUnselectedIcon());
 
         tabView.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View v) {
-                int position = mTabsContainer.indexOfChild(v);
-                if (position != -1) {
-                    if (mViewPager.getCurrentItem() != position) {
-                        if (mSnapOnTabClick) {
-                            mViewPager.setCurrentItem(position, false);
-                        } else {
-                            mViewPager.setCurrentItem(position);
-                        }
-
-                        if (mListener != null) {
-                            mListener.onTabSelect(position);
-                        }
-                    } else {
-                        if (mListener != null) {
-                            mListener.onTabReselect(position);
-                        }
+                int position = (Integer) v.getTag();
+                if (mCurrentTab != position) {
+                    setCurrentTab(position);
+                    if (mListener != null) {
+                        mListener.onTabSelect(position);
+                    }
+                } else {
+                    if (mListener != null) {
+                        mListener.onTabReselect(position);
                     }
                 }
             }
@@ -287,77 +284,49 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
         if (mTabWidth > 0) {
             lp_tab = new LinearLayout.LayoutParams((int) mTabWidth, LayoutParams.MATCH_PARENT);
         }
-
         mTabsContainer.addView(tabView, position, lp_tab);
     }
 
     private void updateTabStyles() {
         for (int i = 0; i < mTabCount; i++) {
-            View v = mTabsContainer.getChildAt(i);
-//            v.setPadding((int) mTabPadding, v.getPaddingTop(), (int) mTabPadding, v.getPaddingBottom());
-            TextView tv_tab_title = (TextView) v.findViewById(R.id.tv_tab_title);
-            if (tv_tab_title != null) {
-                tv_tab_title.setTextColor(i == mCurrentTab ? mTextSelectColor : mTextUnselectColor);
-                tv_tab_title.setTextSize(TypedValue.COMPLEX_UNIT_PX, mTextsize);
-                tv_tab_title.setPadding((int) mTabPadding, 0, (int) mTabPadding, 0);
-                if (mTextAllCaps) {
-                    tv_tab_title.setText(tv_tab_title.getText().toString().toUpperCase());
-                }
-
-                if (mTextBold == TEXT_BOLD_BOTH) {
-                    tv_tab_title.getPaint().setFakeBoldText(true);
-                } else if (mTextBold == TEXT_BOLD_NONE) {
-                    tv_tab_title.getPaint().setFakeBoldText(false);
-                }
+            View tabView = mTabsContainer.getChildAt(i);
+            tabView.setPadding((int) mTabPadding, 0, (int) mTabPadding, 0);
+            TextView tv_tab_title = tabView.findViewById(R.id.tv_tab_title);
+            tv_tab_title.setTextColor(i == mCurrentTab ? mTextSelectColor : mTextUnselectColor);
+            tv_tab_title.setTextSize(TypedValue.COMPLEX_UNIT_PX, mTextsize);
+            //            tv_tab_title.setPadding((int) mTabPadding, 0, (int) mTabPadding, 0);
+            if (mTextAllCaps) {
+                tv_tab_title.setText(tv_tab_title.getText().toString().toUpperCase());
             }
-        }
-    }
 
-    @Override
-    public void onPageScrolled(int position, float positionOffset, int positionOffsetPixels) {
-        /**
-         * position:当前View的位置
-         * mCurrentPositionOffset:当前View的偏移量比例.[0,1)
-         */
-        this.mCurrentTab = position;
-        this.mCurrentPositionOffset = positionOffset;
-        scrollToCurrentTab();
-        invalidate();
-    }
+            if (mTextBold == TEXT_BOLD_BOTH) {
+                tv_tab_title.getPaint().setFakeBoldText(true);
+            } else if (mTextBold == TEXT_BOLD_NONE) {
+                tv_tab_title.getPaint().setFakeBoldText(false);
+            }
 
-    @Override
-    public void onPageSelected(int position) {
-        updateTabSelection(position);
-    }
+            ImageView iv_tab_icon = tabView.findViewById(R.id.iv_tab_icon);
+            if (mIconVisible) {
+                iv_tab_icon.setVisibility(View.VISIBLE);
+                CustomTabEntity tabEntity = mTabEntitys.get(i);
+                iv_tab_icon.setImageResource(i == mCurrentTab ? tabEntity.getTabSelectedIcon() : tabEntity.getTabUnselectedIcon());
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        mIconWidth <= 0 ? LinearLayout.LayoutParams.WRAP_CONTENT : (int) mIconWidth,
+                        mIconHeight <= 0 ? LinearLayout.LayoutParams.WRAP_CONTENT : (int) mIconHeight);
+                if (mIconGravity == Gravity.LEFT) {
+                    lp.rightMargin = (int) mIconMargin;
+                } else if (mIconGravity == Gravity.RIGHT) {
+                    lp.leftMargin = (int) mIconMargin;
+                } else if (mIconGravity == Gravity.BOTTOM) {
+                    lp.topMargin = (int) mIconMargin;
+                } else {
+                    lp.bottomMargin = (int) mIconMargin;
+                }
 
-    @Override
-    public void onPageScrollStateChanged(int state) {
-    }
-
-    /** HorizontalScrollView滚到当前tab,并且居中显示 */
-    private void scrollToCurrentTab() {
-        if (mTabCount <= 0) {
-            return;
-        }
-
-        int offset = (int) (mCurrentPositionOffset * mTabsContainer.getChildAt(mCurrentTab).getWidth());
-        /**当前Tab的left+当前Tab的Width乘以positionOffset*/
-        int newScrollX = mTabsContainer.getChildAt(mCurrentTab).getLeft() + offset;
-
-        if (mCurrentTab > 0 || offset > 0) {
-            /**HorizontalScrollView移动到当前tab,并居中*/
-            newScrollX -= getWidth() / 2 - getPaddingLeft();
-            calcIndicatorRect();
-            newScrollX += ((mTabRect.right - mTabRect.left) / 2);
-        }
-
-        if (newScrollX != mLastScrollX) {
-            mLastScrollX = newScrollX;
-            /** scrollTo（int x,int y）:x,y代表的不是坐标点,而是偏移量
-             *  x:表示离起始位置的x水平方向的偏移量
-             *  y:表示离起始位置的y垂直方向的偏移量
-             */
-            scrollTo(newScrollX, 0);
+                iv_tab_icon.setLayoutParams(lp);
+            } else {
+                iv_tab_icon.setVisibility(View.GONE);
+            }
         }
     }
 
@@ -365,75 +334,81 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
         for (int i = 0; i < mTabCount; ++i) {
             View tabView = mTabsContainer.getChildAt(i);
             final boolean isSelect = i == position;
-            TextView tab_title = (TextView) tabView.findViewById(R.id.tv_tab_title);
-
-            if (tab_title != null) {
-                tab_title.setTextColor(isSelect ? mTextSelectColor : mTextUnselectColor);
-                if (mTextBold == TEXT_BOLD_WHEN_SELECT) {
-                    tab_title.getPaint().setFakeBoldText(isSelect);
-                }
+            TextView tab_title = tabView.findViewById(R.id.tv_tab_title);
+            tab_title.setTextColor(isSelect ? mTextSelectColor : mTextUnselectColor);
+            ImageView iv_tab_icon = tabView.findViewById(R.id.iv_tab_icon);
+            CustomTabEntity tabEntity = mTabEntitys.get(i);
+            iv_tab_icon.setImageResource(isSelect ? tabEntity.getTabSelectedIcon() : tabEntity.getTabUnselectedIcon());
+            if (mTextBold == TEXT_BOLD_WHEN_SELECT) {
+                tab_title.getPaint().setFakeBoldText(isSelect);
             }
         }
     }
 
-    private float margin;
+    private void calcOffset() {
+        final View currentTabView = mTabsContainer.getChildAt(this.mCurrentTab);
+        mCurrentP.left = currentTabView.getLeft();
+        mCurrentP.right = currentTabView.getRight();
+
+        final View lastTabView = mTabsContainer.getChildAt(this.mLastTab);
+        mLastP.left = lastTabView.getLeft();
+        mLastP.right = lastTabView.getRight();
+
+        //        Log.d("AAA", "mLastP--->" + mLastP.left + "&" + mLastP.right);
+        //        Log.d("AAA", "mCurrentP--->" + mCurrentP.left + "&" + mCurrentP.right);
+        if (mLastP.left == mCurrentP.left && mLastP.right == mCurrentP.right) {
+            invalidate();
+        } else {
+            mValueAnimator.setObjectValues(mLastP, mCurrentP);
+            if (mIndicatorBounceEnable) {
+                mValueAnimator.setInterpolator(mInterpolator);
+            }
+
+            if (mIndicatorAnimDuration < 0) {
+                mIndicatorAnimDuration = mIndicatorBounceEnable ? 500 : 250;
+            }
+            mValueAnimator.setDuration(mIndicatorAnimDuration);
+            mValueAnimator.start();
+        }
+    }
 
     private void calcIndicatorRect() {
         View currentTabView = mTabsContainer.getChildAt(this.mCurrentTab);
         float left = currentTabView.getLeft();
         float right = currentTabView.getRight();
 
-        //for mIndicatorWidthEqualTitle
-        if (mIndicatorStyle == STYLE_NORMAL && mIndicatorWidthEqualTitle) {
-            TextView tab_title = (TextView) currentTabView.findViewById(R.id.tv_tab_title);
-            mTextPaint.setTextSize(mTextsize);
-            float textWidth = mTextPaint.measureText(tab_title.getText().toString());
-            margin = (right - left - textWidth) / 2;
-        }
-
-        if (this.mCurrentTab < mTabCount - 1) {
-            View nextTabView = mTabsContainer.getChildAt(this.mCurrentTab + 1);
-            float nextTabLeft = nextTabView.getLeft();
-            float nextTabRight = nextTabView.getRight();
-
-            left = left + mCurrentPositionOffset * (nextTabLeft - left);
-            right = right + mCurrentPositionOffset * (nextTabRight - right);
-
-            //for mIndicatorWidthEqualTitle
-            if (mIndicatorStyle == STYLE_NORMAL && mIndicatorWidthEqualTitle) {
-                TextView next_tab_title = (TextView) nextTabView.findViewById(R.id.tv_tab_title);
-                mTextPaint.setTextSize(mTextsize);
-                float nextTextWidth = mTextPaint.measureText(next_tab_title.getText().toString());
-                float nextMargin = (nextTabRight - nextTabLeft - nextTextWidth) / 2;
-                margin = margin + mCurrentPositionOffset * (nextMargin - margin);
-            }
-        }
-
         mIndicatorRect.left = (int) left;
         mIndicatorRect.right = (int) right;
-        //for mIndicatorWidthEqualTitle
-        if (mIndicatorStyle == STYLE_NORMAL && mIndicatorWidthEqualTitle) {
-            mIndicatorRect.left = (int) (left + margin - 1);
-            mIndicatorRect.right = (int) (right - margin - 1);
-        }
-
-        mTabRect.left = (int) left;
-        mTabRect.right = (int) right;
 
         if (mIndicatorWidth < 0) {   //indicatorWidth小于0时,原jpardogo's PagerSlidingTabStrip
 
         } else {//indicatorWidth大于0时,圆角矩形以及三角形
             float indicatorLeft = currentTabView.getLeft() + (currentTabView.getWidth() - mIndicatorWidth) / 2;
 
-            if (this.mCurrentTab < mTabCount - 1) {
-                View nextTab = mTabsContainer.getChildAt(this.mCurrentTab + 1);
-                indicatorLeft = indicatorLeft + mCurrentPositionOffset * (currentTabView.getWidth() / 2 + nextTab.getWidth() / 2);
-            }
-
             mIndicatorRect.left = (int) indicatorLeft;
             mIndicatorRect.right = (int) (mIndicatorRect.left + mIndicatorWidth);
         }
     }
+
+    @Override
+    public void onAnimationUpdate(ValueAnimator animation) {
+        View currentTabView = mTabsContainer.getChildAt(this.mCurrentTab);
+        IndicatorPoint p = (IndicatorPoint) animation.getAnimatedValue();
+        mIndicatorRect.left = (int) p.left;
+        mIndicatorRect.right = (int) p.right;
+
+        if (mIndicatorWidth < 0) {   //indicatorWidth小于0时,原jpardogo's PagerSlidingTabStrip
+
+        } else {//indicatorWidth大于0时,圆角矩形以及三角形
+            float indicatorLeft = p.left + (currentTabView.getWidth() - mIndicatorWidth) / 2;
+
+            mIndicatorRect.left = (int) indicatorLeft;
+            mIndicatorRect.right = (int) (mIndicatorRect.left + mIndicatorWidth);
+        }
+        invalidate();
+    }
+
+    private boolean mIsFirstDraw = true;
 
     @Override
     protected void onDraw(Canvas canvas) {
@@ -466,8 +441,16 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
         }
 
         //draw indicator line
+        if (mIndicatorAnimEnable) {
+            if (mIsFirstDraw) {
+                mIsFirstDraw = false;
+                calcIndicatorRect();
+            }
+        } else {
+            calcIndicatorRect();
+        }
 
-        calcIndicatorRect();
+
         if (mIndicatorStyle == STYLE_TRIANGLE) {
             if (mIndicatorHeight > 0) {
                 mTrianglePaint.setColor(mIndicatorColor);
@@ -505,7 +488,6 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
 
             if (mIndicatorHeight > 0) {
                 mIndicatorDrawable.setColor(mIndicatorColor);
-
                 if (mIndicatorGravity == Gravity.BOTTOM) {
                     mIndicatorDrawable.setBounds(paddingLeft + (int) mIndicatorMarginLeft + mIndicatorRect.left,
                             height - (int) mIndicatorHeight - (int) mIndicatorMarginBottom,
@@ -525,14 +507,17 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
 
     //setter and getter
     public void setCurrentTab(int currentTab) {
+        mLastTab = this.mCurrentTab;
         this.mCurrentTab = currentTab;
-        mViewPager.setCurrentItem(currentTab);
-
-    }
-
-    public void setCurrentTab(int currentTab, boolean smoothScroll) {
-        this.mCurrentTab = currentTab;
-        mViewPager.setCurrentItem(currentTab, smoothScroll);
+        updateTabSelection(currentTab);
+        if (mFragmentChangeManager != null) {
+            mFragmentChangeManager.setFragments(currentTab);
+        }
+        if (mIndicatorAnimEnable) {
+            calcOffset();
+        } else {
+            invalidate();
+        }
     }
 
     public void setIndicatorStyle(int indicatorStyle) {
@@ -589,9 +574,16 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
         invalidate();
     }
 
-    public void setIndicatorWidthEqualTitle(boolean indicatorWidthEqualTitle) {
-        this.mIndicatorWidthEqualTitle = indicatorWidthEqualTitle;
-        invalidate();
+    public void setIndicatorAnimDuration(long indicatorAnimDuration) {
+        this.mIndicatorAnimDuration = indicatorAnimDuration;
+    }
+
+    public void setIndicatorAnimEnable(boolean indicatorAnimEnable) {
+        this.mIndicatorAnimEnable = indicatorAnimEnable;
+    }
+
+    public void setIndicatorBounceEnable(boolean indicatorBounceEnable) {
+        this.mIndicatorBounceEnable = indicatorBounceEnable;
     }
 
     public void setUnderlineColor(int underlineColor) {
@@ -644,13 +636,34 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
         updateTabStyles();
     }
 
-    public void setTextAllCaps(boolean textAllCaps) {
-        this.mTextAllCaps = textAllCaps;
+    public void setIconVisible(boolean iconVisible) {
+        this.mIconVisible = iconVisible;
         updateTabStyles();
     }
 
-    public void setSnapOnTabClick(boolean snapOnTabClick) {
-        mSnapOnTabClick = snapOnTabClick;
+    public void setIconGravity(int iconGravity) {
+        this.mIconGravity = iconGravity;
+        notifyDataSetChanged();
+    }
+
+    public void setIconWidth(float iconWidth) {
+        this.mIconWidth = dp2px(iconWidth);
+        updateTabStyles();
+    }
+
+    public void setIconHeight(float iconHeight) {
+        this.mIconHeight = dp2px(iconHeight);
+        updateTabStyles();
+    }
+
+    public void setIconMargin(float iconMargin) {
+        this.mIconMargin = dp2px(iconMargin);
+        updateTabStyles();
+    }
+
+    public void setTextAllCaps(boolean textAllCaps) {
+        this.mTextAllCaps = textAllCaps;
+        updateTabStyles();
     }
 
 
@@ -710,6 +723,18 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
         return mIndicatorMarginBottom;
     }
 
+    public long getIndicatorAnimDuration() {
+        return mIndicatorAnimDuration;
+    }
+
+    public boolean isIndicatorAnimEnable() {
+        return mIndicatorAnimEnable;
+    }
+
+    public boolean isIndicatorBounceEnable() {
+        return mIndicatorBounceEnable;
+    }
+
     public int getUnderlineColor() {
         return mUnderlineColor;
     }
@@ -750,9 +775,36 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
         return mTextAllCaps;
     }
 
+    public int getIconGravity() {
+        return mIconGravity;
+    }
+
+    public float getIconWidth() {
+        return mIconWidth;
+    }
+
+    public float getIconHeight() {
+        return mIconHeight;
+    }
+
+    public float getIconMargin() {
+        return mIconMargin;
+    }
+
+    public boolean isIconVisible() {
+        return mIconVisible;
+    }
+
+
+    public ImageView getIconView(int tab) {
+        View tabView = mTabsContainer.getChildAt(tab);
+        ImageView iv_tab_icon = tabView.findViewById(R.id.iv_tab_icon);
+        return iv_tab_icon;
+    }
+
     public TextView getTitleView(int tab) {
         View tabView = mTabsContainer.getChildAt(tab);
-        TextView tv_tab_title = (TextView) tabView.findViewById(R.id.tv_tab_title);
+        TextView tv_tab_title = tabView.findViewById(R.id.tv_tab_title);
         return tv_tab_title;
     }
 
@@ -774,7 +826,7 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
         }
 
         View tabView = mTabsContainer.getChildAt(position);
-        MsgView tipView = (MsgView) tabView.findViewById(R.id.rtv_msg_tip);
+        MsgView tipView = tabView.findViewById(R.id.rtv_msg_tip);
         if (tipView != null) {
             UnreadMsgUtils.show(tipView, num);
 
@@ -782,7 +834,13 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
                 return;
             }
 
-            setMsgMargin(position, 4, 2);
+            if (!mIconVisible) {
+                setMsgMargin(position, 2, 2);
+            } else {
+                setMsgMargin(position, 0,
+                        mIconGravity == Gravity.LEFT || mIconGravity == Gravity.RIGHT ? 4 : 0);
+            }
+
             mInitSetMap.put(position, true);
         }
     }
@@ -799,45 +857,66 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
         showMsg(position, 0);
     }
 
-    /** 隐藏未读消息 */
     public void hideMsg(int position) {
         if (position >= mTabCount) {
             position = mTabCount - 1;
         }
 
         View tabView = mTabsContainer.getChildAt(position);
-        MsgView tipView = (MsgView) tabView.findViewById(R.id.rtv_msg_tip);
+        MsgView tipView = tabView.findViewById(R.id.rtv_msg_tip);
         if (tipView != null) {
             tipView.setVisibility(View.GONE);
         }
     }
 
-    /** 设置未读消息偏移,原点为文字的右上角.当控件高度固定,消息提示位置易控制,显示效果佳 */
+    /**
+     * 设置提示红点偏移,注意
+     * 1.控件为固定高度:参照点为tab内容的右上角
+     * 2.控件高度不固定(WRAP_CONTENT):参照点为tab内容的右上角,此时高度已是红点的最高显示范围,所以这时bottomPadding其实就是topPadding
+     */
     public void setMsgMargin(int position, float leftPadding, float bottomPadding) {
         if (position >= mTabCount) {
             position = mTabCount - 1;
         }
         View tabView = mTabsContainer.getChildAt(position);
-        MsgView tipView = (MsgView) tabView.findViewById(R.id.rtv_msg_tip);
+        MsgView tipView = tabView.findViewById(R.id.rtv_msg_tip);
         if (tipView != null) {
-            TextView tv_tab_title = (TextView) tabView.findViewById(R.id.tv_tab_title);
+            TextView tv_tab_title = tabView.findViewById(R.id.tv_tab_title);
             mTextPaint.setTextSize(mTextsize);
             float textWidth = mTextPaint.measureText(tv_tab_title.getText().toString());
             float textHeight = mTextPaint.descent() - mTextPaint.ascent();
             MarginLayoutParams lp = (MarginLayoutParams) tipView.getLayoutParams();
-            lp.leftMargin = mTabWidth >= 0 ? (int) (mTabWidth / 2 + textWidth / 2 + dp2px(leftPadding)) : (int) (mTabPadding + textWidth + dp2px(leftPadding));
-            lp.topMargin = mHeight > 0 ? (int) (mHeight - textHeight) / 2 - dp2px(bottomPadding) : 0;
+
+            float iconH = mIconHeight;
+            float margin = 0;
+            if (mIconVisible) {
+                if (iconH <= 0) {
+                    iconH = mContext.getResources().getDrawable(mTabEntitys.get(position).getTabSelectedIcon()).getIntrinsicHeight();
+                }
+                margin = mIconMargin;
+            }
+
+            if (mIconGravity == Gravity.TOP || mIconGravity == Gravity.BOTTOM) {
+                lp.leftMargin = dp2px(leftPadding);
+                lp.topMargin = mHeight > 0 ? (int) (mHeight - textHeight - iconH - margin) / 2 - dp2px(bottomPadding) : dp2px(bottomPadding);
+            } else {
+                lp.leftMargin = dp2px(leftPadding);
+                lp.topMargin = mHeight > 0 ? (int) (mHeight - Math.max(textHeight, iconH)) / 2 - dp2px(bottomPadding) : dp2px(bottomPadding);
+            }
+
             tipView.setLayoutParams(lp);
         }
     }
 
-    /** 当前类只提供了少许设置未读消息属性的方法,可以通过该方法获取MsgView对象从而各种设置 */
+    /**
+     * 当前类只提供了少许设置未读消息属性的方法,可以通过该方法获取MsgView对象从而各种设置
+     */
     public MsgView getMsgView(int position) {
         if (position >= mTabCount) {
             position = mTabCount - 1;
         }
         View tabView = mTabsContainer.getChildAt(position);
-        MsgView tipView = (MsgView) tabView.findViewById(R.id.rtv_msg_tip);
+        MsgView tipView = tabView.findViewById(R.id.rtv_msg_tip);
         return tipView;
     }
 
@@ -847,42 +926,6 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
         this.mListener = listener;
     }
 
-    class InnerPagerAdapter extends FragmentPagerAdapter {
-        private ArrayList<Fragment> fragments = new ArrayList<>();
-        private String[] titles;
-
-        public InnerPagerAdapter(FragmentManager fm, ArrayList<Fragment> fragments, String[] titles) {
-            super(fm);
-            this.fragments = fragments;
-            this.titles = titles;
-        }
-
-        @Override
-        public int getCount() {
-            return fragments.size();
-        }
-
-        @Override
-        public CharSequence getPageTitle(int position) {
-            return titles[position];
-        }
-
-        @Override
-        public Fragment getItem(int position) {
-            return fragments.get(position);
-        }
-
-        @Override
-        public void destroyItem(ViewGroup container, int position, Object object) {
-            // 覆写destroyItem并且空实现,这样每个Fragment中的视图就不会被销毁
-            // super.destroyItem(container, position, object);
-        }
-
-        @Override
-        public int getItemPosition(Object object) {
-            return PagerAdapter.POSITION_NONE;
-        }
-    }
 
     @Override
     protected Parcelable onSaveInstanceState() {
@@ -900,11 +943,31 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
             state = bundle.getParcelable("instanceState");
             if (mCurrentTab != 0 && mTabsContainer.getChildCount() > 0) {
                 updateTabSelection(mCurrentTab);
-                scrollToCurrentTab();
             }
         }
         super.onRestoreInstanceState(state);
     }
+
+    class IndicatorPoint {
+        public float left;
+        public float right;
+    }
+
+    private IndicatorPoint mCurrentP = new IndicatorPoint();
+    private IndicatorPoint mLastP = new IndicatorPoint();
+
+    class PointEvaluator implements TypeEvaluator<IndicatorPoint> {
+        @Override
+        public IndicatorPoint evaluate(float fraction, IndicatorPoint startValue, IndicatorPoint endValue) {
+            float left = startValue.left + fraction * (endValue.left - startValue.left);
+            float right = startValue.right + fraction * (endValue.right - startValue.right);
+            IndicatorPoint point = new IndicatorPoint();
+            point.left = left;
+            point.right = right;
+            return point;
+        }
+    }
+
 
     protected int dp2px(float dp) {
         final float scale = mContext.getResources().getDisplayMetrics().density;
@@ -915,4 +978,5 @@ public class SlidingTabLayout extends HorizontalScrollView implements ViewPager.
         final float scale = this.mContext.getResources().getDisplayMetrics().scaledDensity;
         return (int) (sp * scale + 0.5f);
     }
+
 }
